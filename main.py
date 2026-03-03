@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-from datetime import time, datetime
+from datetime import datetime, timedelta
 from typing import List
 
 from telegram import Bot, Update
@@ -10,7 +10,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # --- НАСТРОЙКИ (заполни своими данными) ---
 BOT_TOKEN = "8791185504:AAEYIE7wWFQmruIVUrLTbNJ6-g5QtuhVZbM"
-CHAT_ID = -1003007922511  # ID беседы/группы (обычно отрицательное число)
+CHAT_ID = -1003007922511
 # Диапазон времени отправки (часы, минуты)
 START_HOUR = 8
 END_HOUR = 23
@@ -18,7 +18,7 @@ END_HOUR = 23
 
 # Логирование в консоль
 logging.basicConfig(
-    format="%(asime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -149,6 +149,7 @@ SABLIN_PHRASES = [p for p in PHRASES if p.startswith("САБЛИН")]
 # Для избежания повторов подряд
 used_phrases = []
 last_trigger_response = {}  # Словарь для отслеживания последних ответов на триггеры
+daily_task_running = False
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает входящие сообщения и отвечает на триггеры."""
@@ -159,10 +160,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != CHAT_ID:
         return
     
-    # Проверяем триггеры
+    # Проверяем триггеры (теперь реагируем на упоминания слов)
     response = None
     
-    if message_text == "кто щас таксон?":
+    # Просто "таксон" или "саблин" в любом контексте
+    if "таксон" in message_text:
         # Выбираем случайную фразу про ТАКСОНА
         available = [p for p in TAKSON_PHRASES if p not in last_trigger_response.get('takson', [])]
         if not available:
@@ -172,7 +174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = random.choice(available)
         last_trigger_response.setdefault('takson', []).append(response)
         
-    elif message_text == "кто щас саблин?":
+    elif "саблин" in message_text:
         # Выбираем случайную фразу про САБЛИНА
         available = [p for p in SABLIN_PHRASES if p not in last_trigger_response.get('sablin', [])]
         if not available:
@@ -186,13 +188,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if response:
         try:
             await update.message.reply_text(response)
-            logger.info(f"Ответ на триггер в чате {chat_id}: {response}")
+            logger.info(f"Ответ на упоминание в чате {chat_id}: {response}")
         except TelegramError as e:
             logger.error(f"Ошибка отправки ответа: {e}")
 
 async def send_random_insult(context: ContextTypes.DEFAULT_TYPE):
     """Отправляет случайное оскорбление в чат."""
-    chat_id = context.job.chat_id
+    chat_id = CHAT_ID
     
     # Выбираем фразу
     available = [p for p in PHRASES if p not in used_phrases]
@@ -210,47 +212,47 @@ async def send_random_insult(context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Ошибка отправки: {e}")
 
-async def setup_daily_jobs(app: Application):
-    """Настраивает ежедневные задачи с рандомным временем."""
-    jobs = app.job_queue
+async def daily_scheduler(app: Application):
+    """Планировщик ежедневных сообщений."""
+    global daily_task_running
+    if daily_task_running:
+        return
+    daily_task_running = True
     
-    # Удаляем старые задачи, если они есть (чтобы при перезапуске не дублировались)
-    for job in jobs.jobs():
-        if job.name == "daily_insult":
-            job.schedule_removal()
-    
-    # Генерируем случайное время для следующего дня
-    random_hour = random.randint(START_HOUR, END_HOUR)
-    random_minute = random.randint(0, 59)
-    random_second = random.randint(0, 59)
-    job_time = time(hour=random_hour, minute=random_minute, second=random_second)
-    
-    # Создаем задачу
-    jobs.run_daily(
-        send_random_insult,
-        time=job_time,
-        chat_id=CHAT_ID,
-        name="daily_insult",
-        days=(0, 1, 2, 3, 4, 5, 6)  # Каждый день
-    )
-    
-    logger.info(f"Запланирована отправка на {job_time} ежедневно (чат {CHAT_ID})")
-
-async def reschedule_callback(context: ContextTypes.DEFAULT_TYPE):
-    """Функция, которая перезапускает планировщик каждый день с новым временем."""
-    await setup_daily_jobs(context.application)
+    while True:
+        try:
+            # Вычисляем случайное время для следующей отправки
+            now = datetime.now()
+            
+            # Случайный час и минута
+            random_hour = random.randint(START_HOUR, END_HOUR)
+            random_minute = random.randint(0, 59)
+            
+            # Создаем время для сегодня
+            target_time = now.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
+            
+            # Если время уже прошло сегодня - переносим на завтра
+            if target_time <= now:
+                target_time += timedelta(days=1)
+            
+            # Ждем до нужного времени
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"Следующая отправка запланирована на {target_time} (через {wait_seconds/3600:.1f} часов)")
+            
+            await asyncio.sleep(wait_seconds)
+            
+            # Отправляем сообщение
+            await send_random_insult(ContextTypes.DEFAULT_TYPE(app=app, bot=app.bot))
+            
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике: {e}")
+            await asyncio.sleep(60)  # Подождать минуту при ошибке
 
 async def post_init(app: Application):
     """Действия после инициализации бота."""
-    # Сразу запускаем планировщик при старте
-    await setup_daily_jobs(app)
-    
-    # Запускаем задачу, которая будет переназначать время каждый день в 00:05
-    app.job_queue.run_daily(
-        reschedule_callback,
-        time=time(hour=0, minute=5, second=0),
-        name="reschedule_job"
-    )
+    # Запускаем планировщик в фоне
+    asyncio.create_task(daily_scheduler(app))
+    logger.info("Планировщик ежедневных сообщений запущен")
 
 def main():
     """Точка входа."""
